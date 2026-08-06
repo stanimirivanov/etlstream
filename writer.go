@@ -1,5 +1,7 @@
 package bigsorter
 
+import "io"
+
 // Writer defines an interface for sequentially writing records of type T.
 type Writer[T any] interface {
 	// Write writes a single record to the underlying data destination.
@@ -8,4 +10,8 @@ type Writer[T any] interface {
 	// Flush ensures that any buffered data is written to the underlying destination.
 	// This is crucial when dealing with buffered I/O to prevent data loss.
 	Flush() error
+
+	// Close signals that no more records will be written, allowing
+	// serializers to write footers (like ']') and close underlying files.
+	io.Closer
 }
