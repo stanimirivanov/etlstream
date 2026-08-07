@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/stanimirivanov/bigsorter/internal/merger"
+	"github.com/stanimirivanov/bigsorter/types"
 )
 
 type StringSerializer struct{}
@@ -37,8 +38,12 @@ func (w *stringWriter) Write(s string) error {
 	return err
 }
 
+func (w *stringWriter) Flush() error {
+	return w.writer.Flush()
+}
+
 func (w *stringWriter) Close() error {
-	if err := w.writer.Flush(); err != nil {
+	if err := w.Flush(); err != nil {
 		return err
 	}
 	if w.file != nil {
@@ -47,11 +52,11 @@ func (w *stringWriter) Close() error {
 	return nil
 }
 
-func (s StringSerializer) CreateReader(r io.Reader) (merger.Reader[string], error) {
+func (s StringSerializer) CreateReader(r io.Reader) (types.Reader[string], error) {
 	return &stringReader{scanner: bufio.NewScanner(r)}, nil
 }
 
-func (s StringSerializer) CreateWriter(w io.Writer) (merger.Writer[string], error) {
+func (s StringSerializer) CreateWriter(w io.Writer) (types.Writer[string], error) {
 	closer, _ := w.(io.Closer)
 	return &stringWriter{writer: bufio.NewWriter(w), file: closer}, nil
 }
