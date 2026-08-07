@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/stanimirivanov/bigsorter/internal/splitter"
+	"github.com/stanimirivanov/bigsorter/types"
 )
 
 // StringSerializer implements splitter.Serializer for test strings
@@ -38,8 +39,12 @@ func (w *stringWriter) Write(s string) error {
 	return err
 }
 
+func (w *stringWriter) Flush() error {
+	return w.writer.Flush()
+}
+
 func (w *stringWriter) Close() error {
-	if err := w.writer.Flush(); err != nil {
+	if err := w.Flush(); err != nil {
 		return err
 	}
 	if w.file != nil {
@@ -48,11 +53,11 @@ func (w *stringWriter) Close() error {
 	return nil
 }
 
-func (s StringSerializer) CreateReader(r io.Reader) (splitter.Reader[string], error) {
+func (s StringSerializer) CreateReader(r io.Reader) (types.Reader[string], error) {
 	return &stringReader{scanner: bufio.NewScanner(r)}, nil
 }
 
-func (s StringSerializer) CreateWriter(w io.Writer) (splitter.Writer[string], error) {
+func (s StringSerializer) CreateWriter(w io.Writer) (types.Writer[string], error) {
 	closer, _ := w.(io.Closer)
 	return &stringWriter{writer: bufio.NewWriter(w), file: closer}, nil
 }

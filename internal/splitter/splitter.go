@@ -8,33 +8,14 @@ import (
 	"runtime"
 	"slices"
 	"sync"
+
+	"github.com/stanimirivanov/bigsorter/types"
 )
-
-// Reader abstracts record streaming for the splitter.
-type Reader[T any] interface {
-	Read() (T, error)
-}
-
-// Writer abstracts writing records to disk for the splitter.
-type Writer[T any] interface {
-	Write(record T) error
-	Close() error
-}
-
-// Serializer creates readers and writers for type T.
-type Serializer[T any] interface {
-	CreateReader(r io.Reader) (Reader[T], error)
-	CreateWriter(w io.Writer) (Writer[T], error)
-}
-
-// Comparator compares two records,
-// returning <0 if a < b, 0 if equal, >0 if a > b.
-type Comparator[T any] func(a, b T) int
 
 // Options configures the split phase execution.
 type Options[T any] struct {
-	Serializer  Serializer[T]
-	Comparator  Comparator[T]
+	Serializer  types.Serializer[T]
+	Comparator  types.Comparator[T]
 	MaxItems    int
 	Concurrency int
 	TempDir     string
@@ -77,7 +58,7 @@ func Split[T any](input io.Reader, opts Options[T]) ([]string, error) {
 	return collectResults(fileResCh, readErrCh, &wg)
 }
 
-func startProducer[T any](reader Reader[T], maxItems int, chunksCh chan<- []T, readErrCh chan<- error) {
+func startProducer[T any](reader types.Reader[T], maxItems int, chunksCh chan<- []T, readErrCh chan<- error) {
 	defer close(chunksCh)
 	defer close(readErrCh)
 
@@ -95,7 +76,7 @@ func startProducer[T any](reader Reader[T], maxItems int, chunksCh chan<- []T, r
 	}
 }
 
-func readChunk[T any](reader Reader[T], maxItems int) ([]T, error) {
+func readChunk[T any](reader types.Reader[T], maxItems int) ([]T, error) {
 	chunk := make([]T, 0, maxItems)
 	for len(chunk) < maxItems {
 		record, err := reader.Read()

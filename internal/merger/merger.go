@@ -8,32 +8,13 @@ import (
 	"os"
 
 	"github.com/stanimirivanov/bigsorter/internal/mergeheap"
+	"github.com/stanimirivanov/bigsorter/types"
 )
-
-// Reader abstracts record streaming for the merger.
-type Reader[T any] interface {
-	Read() (T, error)
-}
-
-// Writer abstracts writing records to the output destination.
-type Writer[T any] interface {
-	Write(record T) error
-	Close() error
-}
-
-// Serializer creates readers and writers for type T.
-type Serializer[T any] interface {
-	CreateReader(r io.Reader) (Reader[T], error)
-	CreateWriter(w io.Writer) (Writer[T], error)
-}
-
-// Comparator compares two records, returning <0 if a < b, 0 if equal, >0 if a > b.
-type Comparator[T any] func(a, b T) int
 
 // Options configures the merge phase execution.
 type Options[T any] struct {
-	Serializer Serializer[T]
-	Comparator Comparator[T]
+	Serializer types.Serializer[T]
+	Comparator types.Comparator[T]
 }
 
 type recordResult[T any] struct {
@@ -41,7 +22,7 @@ type recordResult[T any] struct {
 	err    error
 }
 
-// Merge takes a list of sorted temporary file paths and streams them into output using a Min-Heap and background generator pre-fetching.
+// Merge takes a list of sorted temporary file paths and streams them into output using a Min-Heap.
 func Merge[T any](tempFiles []string, output io.Writer, opts Options[T]) error {
 	if opts.Serializer == nil {
 		return errors.New("serializer is required")
@@ -58,7 +39,6 @@ func Merge[T any](tempFiles []string, output io.Writer, opts Options[T]) error {
 	if err != nil {
 		return err
 	}
-	// Close files to abruptly terminate generator goroutines if we exit early
 	defer func() {
 		for _, f := range files {
 			_ = f.Close()
@@ -100,7 +80,7 @@ func setupGenerators[T any](tempFiles []string, opts Options[T]) ([]*os.File, []
 	return files, genChans, nil
 }
 
-func startGenerator[T any](r Reader[T], bufSize int) <-chan recordResult[T] {
+func startGenerator[T any](r types.Reader[T], bufSize int) <-chan recordResult[T] {
 	ch := make(chan recordResult[T], bufSize)
 	go func() {
 		defer close(ch)
@@ -116,7 +96,7 @@ func startGenerator[T any](r Reader[T], bufSize int) <-chan recordResult[T] {
 	return ch
 }
 
-func primeHeap[T any](genChans []<-chan recordResult[T], cmp Comparator[T]) (*mergeheap.RecordHeap[T], error) {
+func primeHeap[T any](genChans []<-chan recordResult[T], cmp types.Comparator[T]) (*mergeheap.RecordHeap[T], error) {
 	rh := &mergeheap.RecordHeap[T]{
 		Items: make([]mergeheap.Item[T], 0, len(genChans)),
 		Cmp:   cmp,
@@ -135,7 +115,7 @@ func primeHeap[T any](genChans []<-chan recordResult[T], cmp Comparator[T]) (*me
 	return rh, nil
 }
 
-func executeKWayMerge[T any](rh *mergeheap.RecordHeap[T], genChans []<-chan recordResult[T], writer Writer[T]) error {
+func executeKWayMerge[T any](rh *mergeheap.RecordHeap[T], genChans []<-chan recordResult[T], writer types.Writer[T]) error {
 	for rh.Len() > 0 {
 		minItem := stdheap.Pop(rh).(mergeheap.Item[T])
 
