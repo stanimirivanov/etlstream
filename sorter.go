@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
 	"slices"
+	"sync"
 
 	"github.com/stanimirivanov/bigsorter/internal/mergeheap"
 )
@@ -23,6 +25,10 @@ type Sorter[T any] struct {
 	// TempDir specifies where temporary chunk files should be stored.
 	// If empty, the system's default temporary directory is used.
 	TempDir string
+
+	// Concurrency specifies the number of parallel workers used during the split phase.
+	// If set to <= 0, it defaults to runtime.NumCPU().
+	Concurrency int
 }
 
 // Sort reads the entire input, sorts it externally, and writes to output.
@@ -34,7 +40,7 @@ func (s *Sorter[T]) Sort(input io.Reader, output io.Writer) error {
 		return errors.New("comparator is required")
 	}
 
-	// Split the large input into smaller, sorted temporary files
+	// 1. Split the massive input into smaller, sorted temporary files concurrently
 	tempFiles, err := s.split(input)
 	if err != nil {
 		return fmt.Errorf("split phase failed: %w", err)
@@ -47,11 +53,17 @@ func (s *Sorter[T]) Sort(input io.Reader, output io.Writer) error {
 		}
 	}()
 
-	// Merge the sorted chunks into the final output
+	// 2. Merge the sorted chunks into the final output using pre-fetching generators
 	return s.merge(tempFiles, output)
 }
 
-// split streams the input, chunks it, sorts each chunk, and writes to disk.
+// Helper struct to pass worker results back to the collector
+type fileResult struct {
+	path string
+	err  error
+}
+
+// split implements a 3-stage pipeline (Producer -> Fan-Out Workers -> Collector)
 func (s *Sorter[T]) split(input io.Reader) ([]string, error) {
 	reader, err := s.Serializer.CreateReader(input)
 	if err != nil {
@@ -60,47 +72,89 @@ func (s *Sorter[T]) split(input io.Reader) ([]string, error) {
 
 	maxItems := s.MaxItems
 	if maxItems <= 0 {
-		maxItems = 100_000 // Default chunk size
+		maxItems = 100_000
 	}
 
+	concurrency := s.Concurrency
+	if concurrency <= 0 {
+		concurrency = runtime.NumCPU()
+	}
+
+	chunksCh := make(chan []T, concurrency)
+	fileResCh := make(chan fileResult, concurrency)
+
+	// Stage 1: Producer Goroutine (Streams records into chunk slices)
+	var readErr error
+	go func() {
+		defer close(chunksCh)
+		for {
+			chunk := make([]T, 0, maxItems)
+			for len(chunk) < maxItems {
+				record, err := reader.Read()
+				if err != nil {
+					if errors.Is(err, io.EOF) {
+						if len(chunk) > 0 {
+							chunksCh <- chunk
+						}
+						return
+					}
+					readErr = fmt.Errorf("read error during split: %w", err)
+					return
+				}
+				chunk = append(chunk, record)
+			}
+			chunksCh <- chunk
+		}
+	}()
+
+	// Stage 2: Fan-Out Worker Pool (Sorts & Writes chunks concurrently)
+	var wg sync.WaitGroup
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for chunk := range chunksCh {
+				filePath, err := s.writeChunk(chunk)
+				fileResCh <- fileResult{path: filePath, err: err}
+			}
+		}()
+	}
+
+	// Wait for workers and close collector channel
+	go func() {
+		wg.Wait()
+		close(fileResCh)
+	}()
+
+	// Stage 3: Fan-In Collector
 	var tempFiles []string
-	chunk := make([]T, 0, maxItems)
+	var splitErr error
 
-	for {
-		record, err := reader.Read()
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				break
+	for res := range fileResCh {
+		if res.err != nil {
+			if splitErr == nil {
+				splitErr = res.err
 			}
-			return tempFiles, fmt.Errorf("read error during split: %w", err)
-		}
-
-		chunk = append(chunk, record)
-
-		// When the chunk reaches the memory limit, sort it and flush to disk
-		if len(chunk) >= maxItems {
-			filePath, err := s.writeChunk(chunk)
-			if err != nil {
-				return tempFiles, err
-			}
-			tempFiles = append(tempFiles, filePath)
-			chunk = chunk[:0] // Reset length, reuse capacity
+		} else if res.path != "" {
+			tempFiles = append(tempFiles, res.path)
 		}
 	}
 
-	// Process any remaining items in the last, partially-filled chunk
-	if len(chunk) > 0 {
-		filePath, err := s.writeChunk(chunk)
-		if err != nil {
-			return tempFiles, err
+	if readErr != nil && splitErr == nil {
+		splitErr = readErr
+	}
+
+	// Clean up if an error occurred during split
+	if splitErr != nil {
+		for _, f := range tempFiles {
+			_ = os.Remove(f)
 		}
-		tempFiles = append(tempFiles, filePath)
+		return nil, splitErr
 	}
 
 	return tempFiles, nil
 }
 
-// writeChunk sorts a single slice of records in memory and saves it to a temp file.
 func (s *Sorter[T]) writeChunk(chunk []T) (string, error) {
 	slices.SortFunc(chunk, s.Comparator)
 
@@ -125,38 +179,30 @@ func (s *Sorter[T]) writeChunk(chunk []T) (string, error) {
 	return file.Name(), nil
 }
 
-// --- Min-Heap Implementation for K-Way Merge ---
-
-// heapItem pairs a record with the index of the reader it came from.
-type heapItem[T any] struct {
-	record    T
-	readerIdx int
+// Helper struct for generator channel outputs
+type recordResult[T any] struct {
+	record T
+	err    error
 }
 
-// recordHeap implements container/heap for heapItem[T].
-type recordHeap[T any] struct {
-	items []heapItem[T]
-	cmp   Comparator[T]
+// Generator pattern: Continuously pre-fetches records from disk in a background goroutine
+func startGenerator[T any](r Reader[T], bufSize int) <-chan recordResult[T] {
+	ch := make(chan recordResult[T], bufSize)
+	go func() {
+		defer close(ch)
+		for {
+			rec, err := r.Read()
+			if err != nil {
+				ch <- recordResult[T]{err: err}
+				return
+			}
+			ch <- recordResult[T]{record: rec}
+		}
+	}()
+	return ch
 }
 
-func (h *recordHeap[T]) Len() int { return len(h.items) }
-func (h *recordHeap[T]) Less(i, j int) bool {
-	// Min-heap: returns true if items[i] < items[j]
-	return h.cmp(h.items[i].record, h.items[j].record) < 0
-}
-func (h *recordHeap[T]) Swap(i, j int) { h.items[i], h.items[j] = h.items[j], h.items[i] }
-func (h *recordHeap[T]) Push(x any)    { h.items = append(h.items, x.(heapItem[T])) }
-func (h *recordHeap[T]) Pop() any {
-	old := h.items
-	n := len(old)
-	item := old[n-1]
-	h.items = old[0 : n-1]
-	return item
-}
-
-// --- K-Way Merge Logic ---
-
-// merge takes the sorted temporary files and combines them into the final output.
+// merge combines sorted temporary files using pre-fetching generator channels and a Min-Heap
 func (s *Sorter[T]) merge(tempFiles []string, output io.Writer) error {
 	if len(tempFiles) == 0 {
 		return nil
@@ -165,14 +211,13 @@ func (s *Sorter[T]) merge(tempFiles []string, output io.Writer) error {
 	files := make([]*os.File, 0, len(tempFiles))
 	readers := make([]Reader[T], 0, len(tempFiles))
 
-	// Ensure all temporary file handles are closed when merging finishes
+	// Closing underlying file handles stops generator goroutines cleanly if merge exits early
 	defer func() {
 		for _, f := range files {
 			_ = f.Close()
 		}
 	}()
 
-	// Open all temp files and initialize readers
 	for _, path := range tempFiles {
 		f, err := os.Open(path)
 		if err != nil {
@@ -187,55 +232,54 @@ func (s *Sorter[T]) merge(tempFiles []string, output io.Writer) error {
 		readers = append(readers, r)
 	}
 
-	// Initialize the Priority Queue (Min-Heap)
+	// Start pre-fetching generator goroutines for each temp file
+	genChans := make([]<-chan recordResult[T], len(readers))
+	for i, r := range readers {
+		genChans[i] = startGenerator(r, 16) // Buffer of 16 items pre-fetched per file
+	}
+
 	rh := &mergeheap.RecordHeap[T]{
 		Items: make([]mergeheap.Item[T], 0, len(readers)),
 		Cmp:   s.Comparator,
 	}
 
-	// Prime the heap with the first record from each temporary file
-	for i, r := range readers {
-		record, err := r.Read()
-		if err != nil {
-			if errors.Is(err, io.EOF) {
+	// Prime heap with the first pre-fetched record from each generator
+	for i, ch := range genChans {
+		res := <-ch
+		if res.err != nil {
+			if errors.Is(res.err, io.EOF) {
 				continue
 			}
-			return fmt.Errorf("failed to prime heap from temp file %d: %w", i, err)
+			return fmt.Errorf("failed to prime heap from temp file %d: %w", i, res.err)
 		}
-		rh.Items = append(rh.Items, mergeheap.Item[T]{Record: record, ReaderIdx: i})
+		rh.Items = append(rh.Items, mergeheap.Item[T]{Record: res.record, ReaderIdx: i})
 	}
 	stdheap.Init(rh)
 
-	// Prepare the final output writer
 	writer, err := s.Serializer.CreateWriter(output)
 	if err != nil {
 		return fmt.Errorf("failed to create output writer: %w", err)
 	}
-	// Flush and close the final writer to ensure footers are written
 	defer writer.Close()
 
-	// Execute the K-Way Merge
+	// K-Way Merge loop
 	for rh.Len() > 0 {
-		// Pop the smallest item globally
 		minItem := stdheap.Pop(rh).(mergeheap.Item[T])
 
-		// Write it to the output file
 		if err := writer.Write(minItem.Record); err != nil {
 			return fmt.Errorf("failed to write record during merge: %w", err)
 		}
 
-		// Read the next record from the specific file that the smallest item just came from
-		nextRecord, err := readers[minItem.ReaderIdx].Read()
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				// Exhausted this chunk, do not push back to heap
+		// Pull next pre-fetched record from the generator channel
+		res := <-genChans[minItem.ReaderIdx]
+		if res.err != nil {
+			if errors.Is(res.err, io.EOF) {
 				continue
 			}
-			return fmt.Errorf("merge read error on temp file %d: %w", minItem.ReaderIdx, err)
+			return fmt.Errorf("merge read error on temp file %d: %w", minItem.ReaderIdx, res.err)
 		}
 
-		// Push the newly read record into the heap to be sorted against the others
-		stdheap.Push(rh, mergeheap.Item[T]{Record: nextRecord, ReaderIdx: minItem.ReaderIdx})
+		stdheap.Push(rh, mergeheap.Item[T]{Record: res.record, ReaderIdx: minItem.ReaderIdx})
 	}
 
 	return nil
