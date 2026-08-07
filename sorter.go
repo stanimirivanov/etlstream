@@ -1,11 +1,14 @@
 package bigsorter
 
 import (
+	stdheap "container/heap"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"slices"
+
+	"github.com/stanimirivanov/bigsorter/internal/mergeheap"
 )
 
 // Sorter configures and executes the external merge sort process.
@@ -31,7 +34,7 @@ func (s *Sorter[T]) Sort(input io.Reader, output io.Writer) error {
 		return errors.New("comparator is required")
 	}
 
-	// 1. Split the massive input into smaller, sorted temporary files
+	// Split the large input into smaller, sorted temporary files
 	tempFiles, err := s.split(input)
 	if err != nil {
 		return fmt.Errorf("split phase failed: %w", err)
@@ -44,7 +47,7 @@ func (s *Sorter[T]) Sort(input io.Reader, output io.Writer) error {
 		}
 	}()
 
-	// 2. Merge the sorted chunks into the final output
+	// Merge the sorted chunks into the final output
 	return s.merge(tempFiles, output)
 }
 
@@ -99,26 +102,20 @@ func (s *Sorter[T]) split(input io.Reader) ([]string, error) {
 
 // writeChunk sorts a single slice of records in memory and saves it to a temp file.
 func (s *Sorter[T]) writeChunk(chunk []T) (string, error) {
-	// 1. Sort the chunk in memory using the user-provided Comparator
 	slices.SortFunc(chunk, s.Comparator)
 
-	// 2. Create a unique temporary file
 	file, err := os.CreateTemp(s.TempDir, "bigsorter-chunk-*")
 	if err != nil {
 		return "", fmt.Errorf("failed to create temp file: %w", err)
 	}
 	defer file.Close()
 
-	// 3. Create a writer using the format-specific Serializer
 	writer, err := s.Serializer.CreateWriter(file)
 	if err != nil {
 		return "", fmt.Errorf("failed to create chunk writer: %w", err)
 	}
-
-	// Ensure Close() is called to flush data and write footers (like JSON ']')
 	defer writer.Close()
 
-	// 4. Stream the sorted records to the temporary file
 	for _, record := range chunk {
 		if err := writer.Write(record); err != nil {
 			return "", fmt.Errorf("failed to write record to chunk: %w", err)
@@ -128,8 +125,118 @@ func (s *Sorter[T]) writeChunk(chunk []T) (string, error) {
 	return file.Name(), nil
 }
 
+// --- Min-Heap Implementation for K-Way Merge ---
+
+// heapItem pairs a record with the index of the reader it came from.
+type heapItem[T any] struct {
+	record    T
+	readerIdx int
+}
+
+// recordHeap implements container/heap for heapItem[T].
+type recordHeap[T any] struct {
+	items []heapItem[T]
+	cmp   Comparator[T]
+}
+
+func (h *recordHeap[T]) Len() int { return len(h.items) }
+func (h *recordHeap[T]) Less(i, j int) bool {
+	// Min-heap: returns true if items[i] < items[j]
+	return h.cmp(h.items[i].record, h.items[j].record) < 0
+}
+func (h *recordHeap[T]) Swap(i, j int) { h.items[i], h.items[j] = h.items[j], h.items[i] }
+func (h *recordHeap[T]) Push(x any)    { h.items = append(h.items, x.(heapItem[T])) }
+func (h *recordHeap[T]) Pop() any {
+	old := h.items
+	n := len(old)
+	item := old[n-1]
+	h.items = old[0 : n-1]
+	return item
+}
+
+// --- K-Way Merge Logic ---
+
 // merge takes the sorted temporary files and combines them into the final output.
 func (s *Sorter[T]) merge(tempFiles []string, output io.Writer) error {
-	// TODO: Implement K-Way Merge using a Priority Queue / Min-Heap.
-	return errors.New("merge phase not yet implemented")
+	if len(tempFiles) == 0 {
+		return nil
+	}
+
+	files := make([]*os.File, 0, len(tempFiles))
+	readers := make([]Reader[T], 0, len(tempFiles))
+
+	// Ensure all temporary file handles are closed when merging finishes
+	defer func() {
+		for _, f := range files {
+			_ = f.Close()
+		}
+	}()
+
+	// Open all temp files and initialize readers
+	for _, path := range tempFiles {
+		f, err := os.Open(path)
+		if err != nil {
+			return fmt.Errorf("failed to open temp file %s: %w", path, err)
+		}
+		files = append(files, f)
+
+		r, err := s.Serializer.CreateReader(f)
+		if err != nil {
+			return fmt.Errorf("failed to create reader for %s: %w", path, err)
+		}
+		readers = append(readers, r)
+	}
+
+	// Initialize the Priority Queue (Min-Heap)
+	rh := &mergeheap.RecordHeap[T]{
+		Items: make([]mergeheap.Item[T], 0, len(readers)),
+		Cmp:   s.Comparator,
+	}
+
+	// Prime the heap with the first record from each temporary file
+	for i, r := range readers {
+		record, err := r.Read()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				continue
+			}
+			return fmt.Errorf("failed to prime heap from temp file %d: %w", i, err)
+		}
+		rh.Items = append(rh.Items, mergeheap.Item[T]{Record: record, ReaderIdx: i})
+	}
+	stdheap.Init(rh)
+
+	// Prepare the final output writer
+	writer, err := s.Serializer.CreateWriter(output)
+	if err != nil {
+		return fmt.Errorf("failed to create output writer: %w", err)
+	}
+	// Flush and close the final writer to ensure footers are written
+	defer writer.Close()
+
+	// Execute the K-Way Merge
+	for rh.Len() > 0 {
+		// Pop the smallest item globally
+		minItem := stdheap.Pop(rh).(mergeheap.Item[T])
+
+		// Write it to the output file
+		if err := writer.Write(minItem.Record); err != nil {
+			return fmt.Errorf("failed to write record during merge: %w", err)
+		}
+
+		// Read the next record from the specific file that the smallest item just came from
+		nextRecord, err := readers[minItem.ReaderIdx].Read()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				// Exhausted this chunk, do not push back to heap
+				continue
+			}
+			return fmt.Errorf("merge read error on temp file %d: %w", minItem.ReaderIdx, err)
+		}
+
+		// Push the newly read record into the heap to be sorted against the others
+		stdheap.Push(rh, mergeheap.Item[T]{Record: nextRecord, ReaderIdx: minItem.ReaderIdx})
+	}
+
+	return nil
 }
