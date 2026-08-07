@@ -28,7 +28,7 @@ Since bigsorter is a library, there is no executable binary to build. Instead,
 you can compile the packages to ensure the code is error-free.
 
 1. Clean up and verify dependencies:
-   Ensure your go.mod file is up-to-date and all necessary dependencies are
+   Ensure your `go.mod` file is up-to-date and all necessary dependencies are
    tracked:
 
 ```bash
