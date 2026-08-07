@@ -152,3 +152,29 @@ you can compile the packages to ensure the code is error-free.
     ```bash
     go fmt ./...
     ```
+
+## Testing
+
+Run all unit and integration tests across all packages:
+
+```bash
+go test -v ./...
+```
+
+To run tests with Go's race detector enabled, `CGO` must be enabled and a C
+compiler (like `gcc`) must be available on your system path:
+
+```bash
+# On macOS / Linux
+CGO_ENABLED=1 go test -v -race ./...
+
+# On Windows (PowerShell)
+$env:CGO_ENABLED="1"; go test -v -race ./...
+
+# On Windows (CMD)
+set CGO_ENABLED=1 && go test -v -race ./...
+```
+
+**Note for Windows Users**: _The `-race` flag requires a C compiler. You can
+easily install `gcc` via Chocolatey by running `choco install mingw -y` in an
+administrative shell._
