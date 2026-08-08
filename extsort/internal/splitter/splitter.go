@@ -1,6 +1,7 @@
 package splitter
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -8,17 +9,21 @@ import (
 	"runtime"
 	"slices"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/stanimirivanov/etlstream/format/types"
 )
 
 // Options configures the split phase execution.
+// OnProgress is a lock-free callback primitive to report metrics upstream
 type Options[T any] struct {
 	Serializer  types.Serializer[T]
 	Comparator  types.Comparator[T]
 	MaxItems    int
 	Concurrency int
 	TempDir     string
+	OnProgress  func(recordsRead int64, filesCount int)
 }
 
 type fileResult struct {
@@ -27,8 +32,8 @@ type fileResult struct {
 }
 
 // Split reads input records, breaks them into sorted chunks,
-// and flushes them to temp files.
-func Split[T any](input io.Reader, opts Options[T]) ([]string, error) {
+// and flushes them to temp files while respecting context cancellation.
+func Split[T any](ctx context.Context, input io.Reader, opts Options[T]) ([]string, error) {
 	if opts.Serializer == nil {
 		return nil, errors.New("serializer is required")
 	}
@@ -48,25 +53,68 @@ func Split[T any](input io.Reader, opts Options[T]) ([]string, error) {
 	readErrCh := make(chan error, 1)
 	var wg sync.WaitGroup
 
+	// Atomic counters for progress tracking
+	var recordsRead int64
+	var filesCount int32
+	var progressDone chan struct{}
+
+	if opts.OnProgress != nil {
+		progressDone = make(chan struct{})
+		go startProgressReporter(progressDone, &recordsRead, &filesCount, opts.OnProgress)
+	}
+
 	// Stage 1: Producer
-	go startProducer(reader, maxItems, chunksCh, readErrCh)
+	go startProducer(ctx, reader, maxItems, chunksCh, readErrCh, &recordsRead)
 
 	// Stage 2: Fan-Out Worker Pool
-	startWorkers(concurrency, chunksCh, fileResCh, &wg, opts)
+	startWorkers(ctx, concurrency, chunksCh, fileResCh, &wg, opts, &filesCount)
 
 	// Stage 3: Fan-In Collector
-	return collectResults(fileResCh, readErrCh, &wg)
+	tempFiles, splitErr := collectResults(fileResCh, readErrCh, &wg)
+
+	// Teardown progress reporting
+	if progressDone != nil {
+		close(progressDone)
+		if splitErr == nil {
+			opts.OnProgress(atomic.LoadInt64(&recordsRead), int(atomic.LoadInt32(&filesCount)))
+		}
+	}
+
+	return tempFiles, splitErr
 }
 
-func startProducer[T any](reader types.Reader[T], maxItems int, chunksCh chan<- []T, readErrCh chan<- error) {
+// startProgressReporter triggers the callback periodically without blocking the I/O pipeline.
+func startProgressReporter(done <-chan struct{}, recordsRead *int64, filesCount *int32, onProgress func(int64, int)) {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			onProgress(atomic.LoadInt64(recordsRead), int(atomic.LoadInt32(filesCount)))
+		case <-done:
+			return
+		}
+	}
+}
+
+func startProducer[T any](ctx context.Context, reader types.Reader[T], maxItems int, chunksCh chan<- []T, readErrCh chan<- error, recordsRead *int64) {
 	defer close(chunksCh)
 	defer close(readErrCh)
 
 	for {
-		chunk, err := readChunk(reader, maxItems)
+		chunk, err := readChunk(ctx, reader, maxItems)
+
 		if len(chunk) > 0 {
-			chunksCh <- chunk
+			atomic.AddInt64(recordsRead, int64(len(chunk)))
+			// Safely push to channel or cancel
+			select {
+			case <-ctx.Done():
+				readErrCh <- ctx.Err()
+				return
+			case chunksCh <- chunk:
+			}
 		}
+
 		if err != nil {
 			if !errors.Is(err, io.EOF) {
 				readErrCh <- fmt.Errorf("read error: %w", err)
@@ -76,9 +124,18 @@ func startProducer[T any](reader types.Reader[T], maxItems int, chunksCh chan<- 
 	}
 }
 
-func readChunk[T any](reader types.Reader[T], maxItems int) ([]T, error) {
+func readChunk[T any](ctx context.Context, reader types.Reader[T], maxItems int) ([]T, error) {
 	chunk := make([]T, 0, maxItems)
 	for len(chunk) < maxItems {
+		// Batch polling: Check context every 10,000 iterations to save CPU cycles
+		if len(chunk)%10000 == 0 {
+			select {
+			case <-ctx.Done():
+				return chunk, ctx.Err()
+			default:
+			}
+		}
+
 		record, err := reader.Read()
 		if err != nil {
 			return chunk, err
@@ -88,13 +145,24 @@ func readChunk[T any](reader types.Reader[T], maxItems int) ([]T, error) {
 	return chunk, nil
 }
 
-func startWorkers[T any](concurrency int, chunksCh <-chan []T, fileResCh chan<- fileResult, wg *sync.WaitGroup, opts Options[T]) {
+func startWorkers[T any](ctx context.Context, concurrency int, chunksCh <-chan []T, fileResCh chan<- fileResult, wg *sync.WaitGroup, opts Options[T], filesCount *int32) {
 	for i := 0; i < concurrency; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for chunk := range chunksCh {
+				// Abort early if context is cancelled before writing
+				select {
+				case <-ctx.Done():
+					fileResCh <- fileResult{err: ctx.Err()}
+					return
+				default:
+				}
+
 				filePath, err := writeChunk(chunk, opts)
+				if err == nil {
+					atomic.AddInt32(filesCount, 1)
+				}
 				fileResCh <- fileResult{path: filePath, err: err}
 			}
 		}()
@@ -104,7 +172,7 @@ func startWorkers[T any](concurrency int, chunksCh <-chan []T, fileResCh chan<- 
 func writeChunk[T any](chunk []T, opts Options[T]) (string, error) {
 	slices.SortFunc(chunk, opts.Comparator)
 
-	file, err := os.CreateTemp(opts.TempDir, "bigsorter-chunk-*")
+	file, err := os.CreateTemp(opts.TempDir, "etlstream-chunk-*")
 	if err != nil {
 		return "", fmt.Errorf("create temp file failed: %w", err)
 	}
@@ -146,6 +214,7 @@ func collectResults(fileResCh chan fileResult, readErrCh <-chan error, wg *sync.
 		splitErr = err
 	}
 
+	// Graceful cleanup of orphaned files on failure or cancellation
 	if splitErr != nil {
 		for _, f := range tempFiles {
 			_ = os.Remove(f)
