@@ -4,17 +4,17 @@ import (
 	"bufio"
 	"io"
 
-	"github.com/stanimirivanov/bigsorter"
+	"github.com/stanimirivanov/etlstream/extsort"
 )
 
-// Serializer implements bigsorter.Serializer for plain text lines.
+// Serializer implements etlstream.Serializer for plain text lines.
 type Serializer struct{}
 
-func (s Serializer) CreateReader(r io.Reader) (bigsorter.Reader[string], error) {
+func (s Serializer) CreateReader(r io.Reader) (extsort.Reader[string], error) {
 	return &reader{scanner: bufio.NewScanner(r)}, nil
 }
 
-func (s Serializer) CreateWriter(w io.Writer) (bigsorter.Writer[string], error) {
+func (s Serializer) CreateWriter(w io.Writer) (extsort.Writer[string], error) {
 	return &writer{bw: bufio.NewWriter(w)}, nil
 }
 

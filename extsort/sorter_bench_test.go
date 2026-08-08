@@ -1,4 +1,4 @@
-package bigsorter_test
+package extsort_test
 
 import (
 	"fmt"
@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/stanimirivanov/bigsorter"
-	"github.com/stanimirivanov/bigsorter/lines"
+	"github.com/stanimirivanov/etlstream/extsort"
+	"github.com/stanimirivanov/etlstream/format/lines"
 )
 
 // Helper to generate a temp file with N random string lines (fixed seed for deterministic benchmarks).
@@ -66,7 +66,7 @@ func BenchmarkSort_DatasetSize(b *testing.B) {
 			for i := 0; i < b.N; i++ {
 				_, _ = inputFile.Seek(0, io.SeekStart)
 
-				s := &bigsorter.Sorter[string]{
+				s := &extsort.Sorter[string]{
 					Serializer: lines.Serializer{},
 					Comparator: strings.Compare,
 					MaxItems:   20_000,
@@ -98,7 +98,7 @@ func BenchmarkSort_ChunkSizes(b *testing.B) {
 			for i := 0; i < b.N; i++ {
 				_, _ = inputFile.Seek(0, io.SeekStart)
 
-				s := &bigsorter.Sorter[string]{
+				s := &extsort.Sorter[string]{
 					Serializer: lines.Serializer{},
 					Comparator: strings.Compare,
 					MaxItems:   chunkSize,
@@ -130,7 +130,7 @@ func BenchmarkSort_Concurrency(b *testing.B) {
 			for i := 0; i < b.N; i++ {
 				_, _ = inputFile.Seek(0, io.SeekStart)
 
-				s := &bigsorter.Sorter[string]{
+				s := &extsort.Sorter[string]{
 					Serializer:  lines.Serializer{},
 					Comparator:  strings.Compare,
 					MaxItems:    10_000,

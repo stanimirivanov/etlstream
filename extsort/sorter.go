@@ -1,4 +1,4 @@
-package bigsorter
+package extsort
 
 import (
 	"errors"
@@ -6,8 +6,8 @@ import (
 	"io"
 	"os"
 
-	"github.com/stanimirivanov/bigsorter/internal/merger"
-	"github.com/stanimirivanov/bigsorter/internal/splitter"
+	"github.com/stanimirivanov/etlstream/extsort/internal/merger"
+	"github.com/stanimirivanov/etlstream/extsort/internal/splitter"
 )
 
 // Sorter configures and executes the external merge sort process.

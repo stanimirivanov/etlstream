@@ -5,7 +5,7 @@ import (
 	"io"
 	"testing"
 
-	"github.com/stanimirivanov/bigsorter/lines"
+	"github.com/stanimirivanov/etlstream/format/lines"
 )
 
 func TestLinesSerializer(t *testing.T) {

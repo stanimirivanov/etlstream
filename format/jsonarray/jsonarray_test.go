@@ -6,7 +6,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/stanimirivanov/bigsorter/jsonarray"
+	"github.com/stanimirivanov/etlstream/format/jsonarray"
 )
 
 type Item struct {

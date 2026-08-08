@@ -1,20 +1,20 @@
-package bigsorter_test
+package extsort_test
 
 import (
 	"bytes"
 	"strings"
 	"testing"
 
-	"github.com/stanimirivanov/bigsorter"
-	"github.com/stanimirivanov/bigsorter/jsonarray"
-	"github.com/stanimirivanov/bigsorter/lines"
+	"github.com/stanimirivanov/etlstream/extsort"
+	"github.com/stanimirivanov/etlstream/format/jsonarray"
+	"github.com/stanimirivanov/etlstream/format/lines"
 )
 
 func TestSorter_TextLines(t *testing.T) {
 	inputData := "banana\napple\ndragonfruit\ncherry\nelderberry\n"
 	expectedOutput := "apple\nbanana\ncherry\ndragonfruit\nelderberry\n"
 
-	sorter := bigsorter.Sorter[string]{
+	sorter := extsort.Sorter[string]{
 		Serializer:  lines.Serializer{},
 		Comparator:  strings.Compare,
 		MaxItems:    2, // Force creation of 3 temporary chunk files to test K-Way merge
@@ -40,7 +40,7 @@ type User struct {
 func TestSorter_JSONArrayStructs(t *testing.T) {
 	inputJSON := `[{"name":"Charlie","age":35},{"name":"Alice","age":25},{"name":"Bob","age":30}]`
 
-	sorter := bigsorter.Sorter[User]{
+	sorter := extsort.Sorter[User]{
 		Serializer: jsonarray.Serializer[User]{},
 		Comparator: func(a, b User) int {
 			return a.Age - b.Age // Sort by Age ascending
@@ -79,7 +79,7 @@ func TestSorter_JSONArrayStructs(t *testing.T) {
 }
 
 func TestSorter_EmptyInput(t *testing.T) {
-	sorter := bigsorter.Sorter[string]{
+	sorter := extsort.Sorter[string]{
 		Serializer: lines.Serializer{},
 		Comparator: strings.Compare,
 		MaxItems:   10,

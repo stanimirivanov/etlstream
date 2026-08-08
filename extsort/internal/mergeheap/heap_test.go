@@ -4,7 +4,7 @@ import (
 	stdheap "container/heap"
 	"testing"
 
-	"github.com/stanimirivanov/bigsorter/internal/mergeheap"
+	"github.com/stanimirivanov/etlstream/extsort/internal/mergeheap"
 )
 
 func TestRecordHeap(t *testing.T) {

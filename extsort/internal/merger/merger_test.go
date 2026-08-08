@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/stanimirivanov/bigsorter/internal/merger"
-	"github.com/stanimirivanov/bigsorter/types"
+	"github.com/stanimirivanov/etlstream/extsort/internal/merger"
+	"github.com/stanimirivanov/etlstream/format/types"
 )
 
 type StringSerializer struct{}
