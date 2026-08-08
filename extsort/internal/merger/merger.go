@@ -7,8 +7,8 @@ import (
 	"io"
 	"os"
 
-	"github.com/stanimirivanov/bigsorter/internal/mergeheap"
-	"github.com/stanimirivanov/bigsorter/types"
+	"github.com/stanimirivanov/etlstream/extsort/internal/mergeheap"
+	"github.com/stanimirivanov/etlstream/format/types"
 )
 
 // Options configures the merge phase execution.

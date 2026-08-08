@@ -5,13 +5,13 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/stanimirivanov/bigsorter"
+	"github.com/stanimirivanov/etlstream/extsort"
 )
 
-// Serializer implements bigsorter.Serializer for JSON arrays containing type T.
+// Serializer implements etlstream.Serializer for JSON arrays containing type T.
 type Serializer[T any] struct{}
 
-func (s Serializer[T]) CreateReader(r io.Reader) (bigsorter.Reader[T], error) {
+func (s Serializer[T]) CreateReader(r io.Reader) (extsort.Reader[T], error) {
 	dec := json.NewDecoder(r)
 
 	// Expect the opening bracket of the JSON array
@@ -26,7 +26,7 @@ func (s Serializer[T]) CreateReader(r io.Reader) (bigsorter.Reader[T], error) {
 	return &reader[T]{dec: dec}, nil
 }
 
-func (s Serializer[T]) CreateWriter(w io.Writer) (bigsorter.Writer[T], error) {
+func (s Serializer[T]) CreateWriter(w io.Writer) (extsort.Writer[T], error) {
 	// Start the JSON array
 	if _, err := w.Write([]byte("[\n")); err != nil {
 		return nil, err

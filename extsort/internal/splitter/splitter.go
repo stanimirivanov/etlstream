@@ -9,7 +9,7 @@ import (
 	"slices"
 	"sync"
 
-	"github.com/stanimirivanov/bigsorter/types"
+	"github.com/stanimirivanov/etlstream/format/types"
 )
 
 // Options configures the split phase execution.

@@ -4,16 +4,16 @@ import (
 	stdcsv "encoding/csv"
 	"io"
 
-	"github.com/stanimirivanov/bigsorter"
+	"github.com/stanimirivanov/etlstream/extsort"
 )
 
-// Serializer implements bigsorter.Serializer for CSV records (as string slices).
+// Serializer implements etlstream.Serializer for CSV records (as string slices).
 // Allows overriding the default ',' delimiter
 type Serializer struct {
 	Comma rune
 }
 
-func (s Serializer) CreateReader(r io.Reader) (bigsorter.Reader[[]string], error) {
+func (s Serializer) CreateReader(r io.Reader) (extsort.Reader[[]string], error) {
 	cr := stdcsv.NewReader(r)
 	if s.Comma != 0 {
 		cr.Comma = s.Comma
@@ -21,7 +21,7 @@ func (s Serializer) CreateReader(r io.Reader) (bigsorter.Reader[[]string], error
 	return &reader{cr: cr}, nil
 }
 
-func (s Serializer) CreateWriter(w io.Writer) (bigsorter.Writer[[]string], error) {
+func (s Serializer) CreateWriter(w io.Writer) (extsort.Writer[[]string], error) {
 	cw := stdcsv.NewWriter(w)
 	if s.Comma != 0 {
 		cw.Comma = s.Comma

@@ -122,7 +122,7 @@ the library.*
 Clone the repository and navigate into the project directory:
 
 ```bash
-git clone [https://github.com/stanimirivanov/bigsorter.git](https://github.com/stanimirivanov/bigsorter.git)
+git clone [https://github.com/stanimirivanov/etlstream.git](https://github.com/stanimirivanov/etlstream.git)
 cd bigsorter
 ```
 
@@ -193,8 +193,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/stanimirivanov/bigsorter"
-	"github.com/stanimirivanov/bigsorter/lines"
+	"github.com/stanimirivanov/etlstream"
+	"github.com/stanimirivanov/etlstream/lines"
 )
 
 func main() {
@@ -210,7 +210,7 @@ func main() {
 	}
 	defer output.Close()
 
-	sorter := &bigsorter.Sorter[string]{
+	sorter := &etlstream.Sorter[string]{
 		Serializer: lines.Serializer{},
 		Comparator: strings.Compare,
 		MaxItems:   50_000, // Keep max 50,000 lines in RAM at once
@@ -223,7 +223,7 @@ func main() {
 ```
 ### 2. Sorting Gzipped Files (.gz)
 
-Because `bigsorter.Sort()` accepts standard `io.Reader` and `io.Writer` 
+Because `etlstream.Sort()` accepts standard `io.Reader` and `io.Writer` 
 interfaces, streaming compressed files requires zero extra configuration—just 
 wrap your file streams with Go's standard `compress/gzip`:
 
@@ -236,8 +236,8 @@ import (
 "os"
 "strings"
 
-	"github.com/stanimirivanov/bigsorter"
-	"github.com/stanimirivanov/bigsorter/lines"
+	"github.com/stanimirivanov/etlstream"
+	"github.com/stanimirivanov/etlstream/lines"
 )
 
 func main() {
@@ -253,7 +253,7 @@ defer gzInput.Close()
 	gzOutput := gzip.NewWriter(rawOutput)
 	defer gzOutput.Close()
 
-	sorter := &bigsorter.Sorter[string]{
+	sorter := &etlstream.Sorter[string]{
 		Serializer: lines.Serializer{},
 		Comparator: strings.Compare,
 		MaxItems:   100_000,
@@ -276,8 +276,8 @@ import (
 	"cmp"
 	"os"
 
-	"github.com/stanimirivanov/bigsorter"
-	"github.com/stanimirivanov/bigsorter/csv"
+	"github.com/stanimirivanov/etlstream"
+	"github.com/stanimirivanov/etlstream/csv"
 )
 
 type User struct {
@@ -301,7 +301,7 @@ func main() {
 		return cmp.Compare(a.Name, b.Name)
 	}
 
-	sorter := &bigsorter.Sorter[User]{
+	sorter := &etlstream.Sorter[User]{
 		Serializer: csv.NewSerializer[User](),
 		Comparator: userComparator,
 		MaxItems:   25_000,

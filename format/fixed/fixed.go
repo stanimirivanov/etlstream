@@ -4,22 +4,22 @@ import (
 	"errors"
 	"io"
 
-	"github.com/stanimirivanov/bigsorter"
+	"github.com/stanimirivanov/etlstream/extsort"
 )
 
-// Serializer implements bigsorter.Serializer for fixed-size byte chunks.
+// Serializer implements etlstream.Serializer for fixed-size byte chunks.
 type Serializer struct {
 	Size int // The strict byte size of each record
 }
 
-func (s Serializer) CreateReader(r io.Reader) (bigsorter.Reader[[]byte], error) {
+func (s Serializer) CreateReader(r io.Reader) (extsort.Reader[[]byte], error) {
 	if s.Size <= 0 {
 		return nil, errors.New("fixed record size must be greater than zero")
 	}
 	return &reader{r: r, size: s.Size}, nil
 }
 
-func (s Serializer) CreateWriter(w io.Writer) (bigsorter.Writer[[]byte], error) {
+func (s Serializer) CreateWriter(w io.Writer) (extsort.Writer[[]byte], error) {
 	if s.Size <= 0 {
 		return nil, errors.New("fixed record size must be greater than zero")
 	}

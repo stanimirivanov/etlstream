@@ -1,3 +1,3 @@
-module github.com/stanimirivanov/bigsorter
+module github.com/stanimirivanov/etlstream
 
 go 1.26.4

@@ -6,7 +6,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/stanimirivanov/bigsorter/fixed"
+	"github.com/stanimirivanov/etlstream/format/fixed"
 )
 
 func TestFixedSizeRecordSerializer(t *testing.T) {

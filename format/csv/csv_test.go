@@ -6,7 +6,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/stanimirivanov/bigsorter/csv"
+	"github.com/stanimirivanov/etlstream/format/csv"
 )
 
 func TestCsvSerializer(t *testing.T) {
