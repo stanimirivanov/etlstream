@@ -1,0 +1,4 @@
+[book]
+title = "Concurrent Data Processing in Go: Building a Disk-Backed Streaming Engine"
+authors = [Stanimir Ivanov]
+language = "en"
