@@ -178,3 +178,193 @@ set CGO_ENABLED=1 && go test -v -race ./...
 **Note for Windows Users**: _The `-race` flag requires a C compiler. You can
 easily install `gcc` via Chocolatey by running `choco install mingw -y` in an
 administrative shell._
+
+## 💡 Usage Examples
+
+### 1. Simple Line-by-Line Text Sorting
+
+Sort a massive text file alphabetically line-by-line:
+
+```go
+package main
+
+import (
+	"log"
+	"os"
+	"strings"
+
+	"github.com/stanimirivanov/bigsorter"
+	"github.com/stanimirivanov/bigsorter/lines"
+)
+
+func main() {
+	input, err := os.Open("unsorted.txt")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer input.Close()
+
+	output, err := os.Create("sorted.txt")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer output.Close()
+
+	sorter := &bigsorter.Sorter[string]{
+		Serializer: lines.Serializer{},
+		Comparator: strings.Compare,
+		MaxItems:   50_000, // Keep max 50,000 lines in RAM at once
+	}
+
+	if err := sorter.Sort(input, output); err != nil {
+		log.Fatalf("sorting failed: %v", err)
+	}
+}
+```
+### 2. Sorting Gzipped Files (.gz)
+
+Because `bigsorter.Sort()` accepts standard `io.Reader` and `io.Writer` 
+interfaces, streaming compressed files requires zero extra configuration—just 
+wrap your file streams with Go's standard `compress/gzip`:
+
+```go
+package main
+
+import (
+"compress/gzip"
+"log"
+"os"
+"strings"
+
+	"github.com/stanimirivanov/bigsorter"
+	"github.com/stanimirivanov/bigsorter/lines"
+)
+
+func main() {
+// Open compressed input
+rawInput, _ := os.Open("huge_log.txt.gz")
+defer rawInput.Close()
+gzInput, _ := gzip.NewReader(rawInput)
+defer gzInput.Close()
+
+	// Create compressed output
+	rawOutput, _ := os.Create("sorted_log.txt.gz")
+	defer rawOutput.Close()
+	gzOutput := gzip.NewWriter(rawOutput)
+	defer gzOutput.Close()
+
+	sorter := &bigsorter.Sorter[string]{
+		Serializer: lines.Serializer{},
+		Comparator: strings.Compare,
+		MaxItems:   100_000,
+	}
+
+	// Decompresses on the fly -> Sorts -> Compresses on the fly
+	if err := sorter.Sort(gzInput, gzOutput); err != nil {
+		log.Fatal(err)
+	}
+}
+```
+
+### 3. Sorting Custom Structs / CSV Data
+Sort complex custom data structures (e.g. Users by Age, then Name):
+
+```go
+package main
+
+import (
+	"cmp"
+	"os"
+
+	"github.com/stanimirivanov/bigsorter"
+	"github.com/stanimirivanov/bigsorter/csv"
+)
+
+type User struct {
+	ID   string `csv:"id"`
+	Name string `csv:"name"`
+	Age  int    `csv:"age"`
+}
+
+func main() {
+	input, _ := os.Open("users.csv")
+	defer input.Close()
+
+	output, _ := os.Create("sorted_users.csv")
+	defer output.Close()
+
+	// Sort by Age (ascending), then by Name alphabetically
+	userComparator := func(a, b User) int {
+		if c := cmp.Compare(a.Age, b.Age); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.Name, b.Name)
+	}
+
+	sorter := &bigsorter.Sorter[User]{
+		Serializer: csv.NewSerializer[User](),
+		Comparator: userComparator,
+		MaxItems:   25_000,
+	}
+
+	_ = sorter.Sort(input, output)
+}
+```
+
+### 4. Custom Serializer Implementation
+If you have a proprietary binary format or custom protocol buffers, implement 
+the `types.Serializer[T]` interface:
+
+```go
+type Serializer[T any] interface {
+    CreateReader(r io.Reader) (Reader[T], error)
+    CreateWriter(w io.Writer) (Writer[T], error)
+}
+```
+
+## ⚡ Benchmarks & Performance
+
+`bigsorter` is designed for high-throughput, memory-bounded external sorting.
+Benchmarks were run on an Intel Core i5-6440HQ CPU @ 2.60GHz (4 cores) using
+32-character random string records.
+
+```bash
+go test -bench=. -benchmem ./...
+```
+
+### Dataset Scaling
+
+| Record Count | Input Size | Time per Op  | Throughput    | Memory / Op | Allocations |
+|:-------------|:-----------|:-------------|:--------------|:------------|:------------|
+| **10,000**   | ~330 KB    | **32.9 ms**  | 10.0 MB/s     | 1.4 MB      | 40k allocs  |
+| **100,000**  | ~3.3 MB    | **94.6 ms**  | **34.8 MB/s** | 13.2 MB     | 400k allocs |
+| **500,000**  | ~16.5 MB   | **573.6 ms** | 28.7 MB/s     | 64.8 MB     | 2.0M allocs |
+
+> *Note: Timings include full disk I/O (reading from input file, writing
+temporary chunk files, and streaming merged output to `io.Discard`).*
+
+---
+
+### Tuning `MaxItems` (Chunk Size)
+
+`MaxItems` dictates how many records are held in memory before flushing a sorted
+chunk to disk.
+
+| `MaxItems` Setting | Time (100k records) | Throughput     | Impact                                                            |
+|:-------------------|:--------------------|:---------------|:------------------------------------------------------------------|
+| **1,000**          | 853.7 ms            | 3.87 MB/s      | Too small — excessive temporary files and disk I/O overhead.      |
+| **10,000**         | 137.6 ms            | 23.97 MB/s     | Good base setting for constrained memory environments.            |
+| **25,000**         | **94.6 ms**         | **34.88 MB/s** | 🏆 **Optimal balance** between CPU sorting and I/O efficiency.    |
+| **50,000**         | 117.7 ms            | 28.04 MB/s     | Slight overhead due to larger $O(N \log N)$ slice sorting in RAM. |
+
+---
+
+### Key Takeaways & Recommendations
+
+* **Optimal `MaxItems`:** For string/struct sorting, setting `MaxItems` between
+  **25,000 and 100,000** yields the highest throughput (~35 MB/s).
+* **Predictable Memory Footprint:** Memory usage scales linearly with
+  `MaxItems`, keeping heap footprint low and predictable regardless of how large
+  the input file is.
+* **Low Allocation Overhead:** Averages ~4 allocations per record throughout the
+  entire split, sort, and merge pipeline.
