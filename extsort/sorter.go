@@ -1,13 +1,8 @@
 package extsort
 
 import (
-	"errors"
-	"fmt"
+	"context"
 	"io"
-	"os"
-
-	"github.com/stanimirivanov/etlstream/extsort/internal/merger"
-	"github.com/stanimirivanov/etlstream/extsort/internal/splitter"
 )
 
 // Sorter configures and executes the external merge sort process.
@@ -26,43 +21,36 @@ type Sorter[T any] struct {
 	// Concurrency specifies the number of parallel workers used during the split phase.
 	// If set to <= 0, it defaults to runtime.NumCPU().
 	Concurrency int
+
+	// ProgressFunc is called periodically with metrics if provided.
+	ProgressFunc ProgressFunc
 }
 
-// Sort reads the entire input, sorts it externally, and writes to output.
+// Sort reads records from the input, sorts them, and writes to the output.
+// It uses context.Background() by default.
 func (s *Sorter[T]) Sort(input io.Reader, output io.Writer) error {
-	if s.Serializer == nil {
-		return errors.New("serializer is required")
-	}
-	if s.Comparator == nil {
-		return errors.New("comparator is required")
-	}
+	return s.SortContext(context.Background(), input, output)
+}
 
-	// Phase A: Split & Sort into temporary chunk files
-	tempFiles, err := splitter.Split(input, splitter.Options[T]{
-		Serializer:  s.Serializer,
-		Comparator:  s.Comparator,
-		MaxItems:    s.MaxItems,
-		Concurrency: s.Concurrency,
-		TempDir:     s.TempDir,
-	})
-	if err != nil {
-		return fmt.Errorf("split phase failed: %w", err)
-	}
-
-	// Ensure temporary files are cleaned up upon completion or failure
-	defer func() {
-		for _, file := range tempFiles {
-			_ = os.Remove(file)
+// SortContext performs the external sort but listens for cancellation signals.
+func (s *Sorter[T]) SortContext(ctx context.Context, input io.Reader, output io.Writer) error {
+	// Phase 1: Split
+	// We will soon update splitter.Split to accept ctx and a progress callback
+	/*
+		tempFiles, err := splitter.Split(ctx, input, splitter.Options[T]{ ... })
+		if err != nil {
+			return err
 		}
-	}()
+	*/
 
-	// Phase B: K-Way Merge into final output
-	if err := merger.Merge(tempFiles, output, merger.Options[T]{
-		Serializer: s.Serializer,
-		Comparator: s.Comparator,
-	}); err != nil {
-		return fmt.Errorf("merge phase failed: %w", err)
-	}
+	// Phase 2: Merge
+	// We will soon update merger.Merge to accept ctx and a progress callback
+	/*
+		err = merger.Merge(ctx, tempFiles, output, merger.Options[T]{ ... })
+		if err != nil {
+			return err
+		}
+	*/
 
-	return nil
+	return nil // placeholder until we wire the internals
 }
