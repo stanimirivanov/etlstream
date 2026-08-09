@@ -3,6 +3,7 @@ package merger_test
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"io"
 	"os"
 	"strings"
@@ -98,7 +99,7 @@ func TestMerger_KWayMerge(t *testing.T) {
 	}
 
 	out := &bytes.Buffer{}
-	err := merger.Merge(tempFiles, out, opts)
+	err := merger.Merge(context.Background(), tempFiles, out, opts)
 	if err != nil {
 		t.Fatalf("Merge failed: %v", err)
 	}
@@ -111,7 +112,7 @@ func TestMerger_KWayMerge(t *testing.T) {
 
 func TestMerger_Validation(t *testing.T) {
 	out := &bytes.Buffer{}
-	err := merger.Merge[string]([]string{"dummy"}, out, merger.Options[string]{})
+	err := merger.Merge[string](context.Background(), []string{"dummy"}, out, merger.Options[string]{})
 	if err == nil {
 		t.Error("expected error for missing options, got nil")
 	}
