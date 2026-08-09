@@ -3,6 +3,7 @@ package splitter_test
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"io"
 	"os"
 	"strings"
@@ -72,7 +73,8 @@ func TestSplitter_ChunksAndSorts(t *testing.T) {
 		Concurrency: 2, // Tests concurrent workers
 	}
 
-	tempFiles, err := splitter.Split(bytes.NewBufferString(inputData), opts)
+	// In TestSplitter_ChunksAndSorts
+	tempFiles, err := splitter.Split(context.Background(), bytes.NewBufferString(inputData), opts)
 	if err != nil {
 		t.Fatalf("Split failed: %v", err)
 	}
@@ -120,7 +122,7 @@ func TestSplitter_ChunksAndSorts(t *testing.T) {
 }
 
 func TestSplitter_Validation(t *testing.T) {
-	_, err := splitter.Split[string](bytes.NewBufferString("test"), splitter.Options[string]{})
+	_, err := splitter.Split[string](context.Background(), bytes.NewBufferString("test"), splitter.Options[string]{})
 	if err == nil {
 		t.Error("expected error for missing serializer/comparator, got nil")
 	}
