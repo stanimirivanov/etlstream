@@ -3,24 +3,31 @@ package extsort
 import (
 	"context"
 	"io"
+
+	"github.com/stanimirivanov/etlstream/extsort/internal/merger"
+	"github.com/stanimirivanov/etlstream/extsort/internal/splitter"
+	"github.com/stanimirivanov/etlstream/format/types"
 )
 
-// Sorter configures and executes the external merge sort process.
+// Sorter orchestrates the external sorting process.
 type Sorter[T any] struct {
-	Serializer Serializer[T]
-	Comparator Comparator[T]
+	// Serializer converts the generic type T to and from bytes.
+	Serializer types.Serializer[T]
 
-	// MaxItems limits the number of records held in memory per chunk.
-	// If set to <= 0, it defaults to 100,000.
+	// Comparator defines the sorting order for type T.
+	Comparator types.Comparator[T]
+
+	// MaxItems defines the maximum number of records kept in memory per worker.
 	MaxItems int
 
-	// TempDir specifies where temporary chunk files should be stored.
-	// If empty, the system's default temporary directory is used.
+	// Concurrency sets the number of concurrent goroutines for the split phase.
+	Concurrency int
+
+	// TempDir specifies where temporary chunk files will be written.
 	TempDir string
 
-	// Concurrency specifies the number of parallel workers used during the split phase.
-	// If set to <= 0, it defaults to runtime.NumCPU().
-	Concurrency int
+	// Unique determines if consecutive duplicate records should be dropped.
+	Unique bool
 
 	// ProgressFunc is called periodically with metrics if provided.
 	ProgressFunc ProgressFunc
@@ -32,25 +39,55 @@ func (s *Sorter[T]) Sort(input io.Reader, output io.Writer) error {
 	return s.SortContext(context.Background(), input, output)
 }
 
-// SortContext performs the external sort but listens for cancellation signals.
+// SortContext performs the external sort but listens for cancellation signals
+// and reports progress back to the caller.
 func (s *Sorter[T]) SortContext(ctx context.Context, input io.Reader, output io.Writer) error {
-	// Phase 1: Split
-	// We will soon update splitter.Split to accept ctx and a progress callback
-	/*
-		tempFiles, err := splitter.Split(ctx, input, splitter.Options[T]{ ... })
-		if err != nil {
-			return err
-		}
-	*/
+	// ---------------------------------------------------------
+	// PHASE 1: SPLIT
+	// ---------------------------------------------------------
+	splitOpts := splitter.Options[T]{
+		Serializer:  s.Serializer,
+		Comparator:  s.Comparator,
+		MaxItems:    s.MaxItems,
+		Concurrency: s.Concurrency,
+		TempDir:     s.TempDir,
+	}
 
-	// Phase 2: Merge
-	// We will soon update merger.Merge to accept ctx and a progress callback
-	/*
-		err = merger.Merge(ctx, tempFiles, output, merger.Options[T]{ ... })
-		if err != nil {
-			return err
+	// Map the internal lock-free callback to the public struct
+	if s.ProgressFunc != nil {
+		splitOpts.OnProgress = func(recordsRead int64, filesCount int) {
+			s.ProgressFunc(Progress{
+				Phase:          PhaseSplit,
+				RecordsRead:    recordsRead,
+				TempFilesCount: filesCount,
+			})
 		}
-	*/
+	}
 
-	return nil // placeholder until we wire the internals
+	tempFiles, err := splitter.Split(ctx, input, splitOpts)
+	if err != nil {
+		return err
+	}
+
+	// ---------------------------------------------------------
+	// PHASE 2: MERGE
+	// ---------------------------------------------------------
+	mergeOpts := merger.Options[T]{
+		Serializer: s.Serializer,
+		Comparator: s.Comparator,
+		Unique:     s.Unique,
+	}
+
+	// Map the internal lock-free callback to the public struct
+	if s.ProgressFunc != nil {
+		mergeOpts.OnProgress = func(recordsProcessed int64) {
+			s.ProgressFunc(Progress{
+				Phase:          PhaseMerge,
+				RecordsRead:    recordsProcessed,
+				TempFilesCount: len(tempFiles),
+			})
+		}
+	}
+
+	return merger.Merge(ctx, tempFiles, output, mergeOpts)
 }
