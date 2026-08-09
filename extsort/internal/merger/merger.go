@@ -1,11 +1,13 @@
 package merger
 
 import (
-	stdheap "container/heap"
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"sync/atomic"
+	"time"
 
 	"github.com/stanimirivanov/etlstream/extsort/internal/mergeheap"
 	"github.com/stanimirivanov/etlstream/format/types"
@@ -15,41 +17,50 @@ import (
 type Options[T any] struct {
 	Serializer types.Serializer[T]
 	Comparator types.Comparator[T]
+	Unique     bool // Drops consecutive duplicate records
+	// OnProgress is a lock-free callback primitive to report metrics upstream
+	OnProgress func(recordsProcessed int64)
 }
 
-type recordResult[T any] struct {
-	record T
-	err    error
-}
-
-// Merge takes a list of sorted temporary file paths and streams them into output using a Min-Heap.
-func Merge[T any](tempFiles []string, output io.Writer, opts Options[T]) error {
+// Merge reads from multiple sorted temporary files and multiplexes them
+// into a single globally sorted output stream using a Min-Heap.
+func Merge[T any](ctx context.Context, tempFiles []string, output io.Writer, opts Options[T]) error {
 	if opts.Serializer == nil {
 		return errors.New("serializer is required")
 	}
 	if opts.Comparator == nil {
 		return errors.New("comparator is required")
 	}
-
 	if len(tempFiles) == 0 {
-		return nil
+		return nil // Nothing to merge
 	}
 
-	files, genChans, err := setupGenerators(tempFiles, opts)
-	if err != nil {
-		return err
-	}
+	// 1. Open all temp files and create readers
+	files := make([]*os.File, 0, len(tempFiles))
+
+	// Defer cleanup: close and remove all temporary files
 	defer func() {
 		for _, f := range files {
 			_ = f.Close()
 		}
+		for _, path := range tempFiles {
+			_ = os.Remove(path)
+		}
 	}()
 
-	rh, err := primeHeap(genChans, opts.Comparator)
-	if err != nil {
-		return err
+	for _, path := range tempFiles {
+		f, err := os.Open(path)
+		if err != nil {
+			return fmt.Errorf("failed to open temp file %s: %w", path, err)
+		}
+		files = append(files, f)
 	}
-	stdheap.Init(rh)
+
+	// 2. Initialize the Min-Heap
+	heap, err := mergeheap.New(files, opts.Serializer, opts.Comparator)
+	if err != nil {
+		return fmt.Errorf("failed to initialize merge heap: %w", err)
+	}
 
 	writer, err := opts.Serializer.CreateWriter(output)
 	if err != nil {
@@ -57,81 +68,94 @@ func Merge[T any](tempFiles []string, output io.Writer, opts Options[T]) error {
 	}
 	defer writer.Close()
 
-	return executeKWayMerge(rh, genChans, writer)
-}
+	// 3. Setup Progress Reporting
+	var recordsProcessed int64
+	var progressDone chan struct{}
 
-func setupGenerators[T any](tempFiles []string, opts Options[T]) ([]*os.File, []<-chan recordResult[T], error) {
-	files := make([]*os.File, 0, len(tempFiles))
-	genChans := make([]<-chan recordResult[T], 0, len(tempFiles))
-
-	for _, path := range tempFiles {
-		f, err := os.Open(path)
-		if err != nil {
-			return files, nil, fmt.Errorf("failed to open temp file %s: %w", path, err)
-		}
-		files = append(files, f)
-
-		r, err := opts.Serializer.CreateReader(f)
-		if err != nil {
-			return files, nil, fmt.Errorf("failed to create reader for %s: %w", path, err)
-		}
-		genChans = append(genChans, startGenerator(r, 16))
+	if opts.OnProgress != nil {
+		progressDone = make(chan struct{})
+		go startProgressReporter(progressDone, &recordsProcessed, opts.OnProgress)
 	}
-	return files, genChans, nil
-}
 
-func startGenerator[T any](r types.Reader[T], bufSize int) <-chan recordResult[T] {
-	ch := make(chan recordResult[T], bufSize)
-	go func() {
-		defer close(ch)
-		for {
-			rec, err := r.Read()
-			if err != nil {
-				ch <- recordResult[T]{err: err}
-				return
-			}
-			ch <- recordResult[T]{record: rec}
+	defer func() {
+		if progressDone != nil {
+			close(progressDone)
+			// Trigger one final update on exit
+			opts.OnProgress(atomic.LoadInt64(&recordsProcessed))
 		}
 	}()
-	return ch
-}
 
-func primeHeap[T any](genChans []<-chan recordResult[T], cmp types.Comparator[T]) (*mergeheap.RecordHeap[T], error) {
-	rh := &mergeheap.RecordHeap[T]{
-		Items: make([]mergeheap.Item[T], 0, len(genChans)),
-		Cmp:   cmp,
-	}
+	// 4. The Merge Loop
+	var hasLast bool
+	var lastRecord T
 
-	for i, ch := range genChans {
-		res := <-ch
-		if res.err != nil {
-			if errors.Is(res.err, io.EOF) {
+	for heap.Len() > 0 {
+		// Batch polling: Check context every 10,000 records to save CPU cycles
+		if recordsProcessed%10000 == 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+		}
+
+		item := heap.Pop()
+
+		// Deduplication Logic (Phase 1)
+		if opts.Unique && hasLast {
+			if opts.Comparator(lastRecord, item.Record) == 0 {
+				// It's a duplicate. Advance the reader but skip writing.
+				if err := advanceStream(heap, item); err != nil {
+					return err
+				}
 				continue
 			}
-			return nil, fmt.Errorf("failed to prime heap from temp file %d: %w", i, res.err)
 		}
-		rh.Items = append(rh.Items, mergeheap.Item[T]{Record: res.record, ReaderIdx: i})
+
+		// Write to the final output
+		if err := writer.Write(item.Record); err != nil {
+			return fmt.Errorf("write error during merge: %w", err)
+		}
+
+		lastRecord = item.Record
+		hasLast = true
+		atomic.AddInt64(&recordsProcessed, 1)
+
+		// Advance the stream that we just popped from
+		if err := advanceStream(heap, item); err != nil {
+			return err
+		}
 	}
-	return rh, nil
-}
 
-func executeKWayMerge[T any](rh *mergeheap.RecordHeap[T], genChans []<-chan recordResult[T], writer types.Writer[T]) error {
-	for rh.Len() > 0 {
-		minItem := stdheap.Pop(rh).(mergeheap.Item[T])
-
-		if err := writer.Write(minItem.Record); err != nil {
-			return fmt.Errorf("failed to write record during merge: %w", err)
-		}
-
-		res := <-genChans[minItem.ReaderIdx]
-		if res.err != nil {
-			if errors.Is(res.err, io.EOF) {
-				continue
-			}
-			return fmt.Errorf("merge read error on temp file %d: %w", minItem.ReaderIdx, res.err)
-		}
-
-		stdheap.Push(rh, mergeheap.Item[T]{Record: res.record, ReaderIdx: minItem.ReaderIdx})
-	}
 	return nil
+}
+
+// advanceStream reads the next record from the popped item's stream
+// and pushes it back into the heap if not EOF.
+func advanceStream[T any](heap *mergeheap.Heap[T], item *mergeheap.Item[T]) error {
+	nextRecord, err := item.Reader.Read()
+	if err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil // Stream exhausted, do not push back
+		}
+		return fmt.Errorf("read error during merge: %w", err)
+	}
+
+	item.Record = nextRecord
+	heap.Push(item)
+	return nil
+}
+
+// startProgressReporter triggers the callback periodically without blocking the loop.
+func startProgressReporter(done <-chan struct{}, recordsProcessed *int64, onProgress func(int64)) {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			onProgress(atomic.LoadInt64(recordsProcessed))
+		case <-done:
+			return
+		}
+	}
 }
