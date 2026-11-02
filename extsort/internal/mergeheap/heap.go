@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/stanimirivanov/etlstream/extsort/internal/generator"
 	"github.com/stanimirivanov/etlstream/format/types"
 )
 
@@ -62,6 +63,11 @@ func New[T any](files []*os.File, serializer types.Serializer[T], comparator typ
 		if err != nil {
 			return nil, fmt.Errorf("failed to create reader for heap: %w", err)
 		}
+
+		// Wrap the stream with a generator so the merge phase can drain a
+		// buffered channel instead of blocking the heap on synchronous
+		// disk I/O for every record.
+		reader = generator.NewReader(reader)
 
 		// Read the first record to seed the heap.
 		// If we hit EOF immediately, we just don't add this file to the heap.
